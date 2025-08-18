@@ -7,18 +7,15 @@ const wagonBOMSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
-  parts: {
-    Underframe: { type: Number, required: true },
-    BodySide: { type: Number, required: true },
-    BodyEnd: { type: Number, required: true },
-    Roof: { type: Number, required: true },
-    Wheel: { type: Number, required: true },
-    Bogie: { type: Number, required: true },
-    Coupler: { type: Number, required: true },
-    Barrel: { type: Number, required: false },
-    BrakeSystem: { type: Number, required: true },
-    Door: { type: Number, required: true }
-  }
+  parts: [
+    {
+      name: { type: String, required: true },
+      total: { type: Number, required: true }
+    }
+  ],
+  stages: [
+    { type: String }
+  ]
 }, { timestamps: true });
 
 module.exports = mongoose.model('WagonBOM', wagonBOMSchema);
