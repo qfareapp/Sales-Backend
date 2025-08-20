@@ -22,7 +22,7 @@ router.get('/monthly-planning', async (req, res) => {
   try {
     const plans = await ProductionPlan.find().sort({ createdAt: -1 }).lean();
 
-    // group PDI counts from logs
+    // group PDI + Pullout counts from logs
     const logs = await DailyWagonLog.aggregate([
       {
         $group: {
@@ -34,16 +34,20 @@ router.get('/monthly-planning', async (req, res) => {
     ]);
 
     const logMap = new Map(
-      logs.map(l => [l._id, { totalPDI: l.totalPDI, totalPullout: l.totalPullout }])
+      logs.map(l => [l._id, {
+        totalPDI: l.totalPDI,
+        totalPullout: l.totalPullout,
+        readyForPullout: l.totalPDI - l.totalPullout
+      }])
     );
 
     // attach PDI + Pullout info to each plan
     const enriched = plans.map(p => {
-      const logStats = logMap.get(p.projectId) || { totalPDI: 0, totalPullout: 0 };
+      const logStats = logMap.get(p.projectId) || { totalPDI: 0, totalPullout: 0, readyForPullout: 0 };
       return {
         ...p,
         pdi: logStats.totalPDI,
-        readyForPullout: logStats.totalPDI, // mirror PDI
+        readyForPullout: logStats.readyForPullout,
         pulloutDone: logStats.totalPullout
       };
     });
@@ -55,7 +59,7 @@ router.get('/monthly-planning', async (req, res) => {
 });
 
 // ----------------------
-// ✅ Daily Wagon Update (hardened)
+// ✅ Daily Wagon Update (store PDI as Ready for Pullout)
 // ----------------------
 router.post('/daily-wagon-update', async (req, res) => {
   const {
@@ -135,9 +139,9 @@ router.post('/daily-wagon-update', async (req, res) => {
       stagesCompleted,
       partsConsumed: totalPartsToConsume,
       wagonReadyCount,
-      pdiCount,                // ✅ final stage
-      readyForPullout: pdiCount, // ✅ mirror PDI
-      pulloutDone: 0           // ✅ initialize
+      pdiCount,                 // ✅ final stage
+      readyForPullout: pdiCount,// ✅ mirror PDI
+      pulloutDone: 0            // ✅ no pullout at creation
     });
 
     res.json({ status: 'Success', message: '✅ Daily update saved successfully' });
@@ -148,49 +152,67 @@ router.post('/daily-wagon-update', async (req, res) => {
 });
 
 // ----------------------
-// ✅ Update Pullout (by projectId)
+// ✅ Update Pullout (cumulative by projectId)
 // ----------------------
 router.post('/pullout-update/:projectId', async (req, res) => {
   try {
     const { count } = req.body;
     const { projectId } = req.params;
 
-    // find the latest log for this project
-    const log = await DailyWagonLog.findOne({ projectId }).sort({ date: -1 });
-
-    if (!log) {
-      return res.status(404).json({ status: 'Error', message: 'Log not found' });
-    }
-
     if (!count || count <= 0) {
       return res.status(400).json({ status: 'Error', message: 'Count must be greater than 0' });
     }
 
-    if (count > log.pdiCount) {
+    // 1. Get totals from logs
+    const totals = await DailyWagonLog.aggregate([
+      { $match: { projectId } },
+      {
+        $group: {
+          _id: null,
+          totalPDI: { $sum: '$pdiCount' },
+          totalPullout: { $sum: '$pulloutDone' }
+        }
+      }
+    ]);
+
+    const stats = totals[0] || { totalPDI: 0, totalPullout: 0 };
+    const readyForPullout = stats.totalPDI - stats.totalPullout;
+
+    if (count > readyForPullout) {
       return res.status(400).json({
         status: 'Error',
-        message: `Only ${log.pdiCount} wagons available for pullout`
+        message: `Only ${readyForPullout} wagons available for pullout`
       });
     }
 
-    // 🔄 Update values
-    log.pulloutDone += count;
-    log.pdiCount -= count;
-    log.readyForPullout = log.pdiCount; // mirror PDI
-
-    await log.save();
+    // 2. Log the pullout as a new entry (history preserved)
+    await DailyWagonLog.create({
+      date: new Date(),
+      projectId,
+      wagonType: 'N/A', // optional, can fetch from plan
+      partsProduced: {},
+      stagesCompleted: {},
+      partsConsumed: {},
+      wagonReadyCount: 0,
+      pdiCount: 0,                  // no new PDI
+      readyForPullout: 0,           // no new ready wagons
+      pulloutDone: count            // only pullout recorded
+    });
 
     res.json({
       status: 'Success',
       message: `${count} wagons pulled out successfully`,
-      log
+      newTotals: {
+        totalPDI: stats.totalPDI,
+        totalPullout: stats.totalPullout + count,
+        readyForPullout: readyForPullout - count
+      }
     });
   } catch (err) {
     console.error('❌ Pullout update error:', err);
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
-
 
 // ----------------------
 // ✅ Get BOM
