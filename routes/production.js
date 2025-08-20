@@ -20,8 +20,35 @@ router.post('/monthly-planning', async (req, res) => {
 
 router.get('/monthly-planning', async (req, res) => {
   try {
-    const plans = await ProductionPlan.find().sort({ createdAt: -1 });
-    res.json(plans);
+    const plans = await ProductionPlan.find().sort({ createdAt: -1 }).lean();
+
+    // group PDI counts from logs
+    const logs = await DailyWagonLog.aggregate([
+      {
+        $group: {
+          _id: '$projectId',
+          totalPDI: { $sum: '$pdiCount' },
+          totalPullout: { $sum: '$pulloutDone' }
+        }
+      }
+    ]);
+
+    const logMap = new Map(
+      logs.map(l => [l._id, { totalPDI: l.totalPDI, totalPullout: l.totalPullout }])
+    );
+
+    // attach PDI + Pullout info to each plan
+    const enriched = plans.map(p => {
+      const logStats = logMap.get(p.projectId) || { totalPDI: 0, totalPullout: 0 };
+      return {
+        ...p,
+        pdi: logStats.totalPDI,
+        readyForPullout: logStats.totalPDI, // mirror PDI
+        pulloutDone: logStats.totalPullout
+      };
+    });
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ status: 'Error', message: err.message });
   }
@@ -41,7 +68,6 @@ router.post('/daily-wagon-update', async (req, res) => {
   } = req.body;
 
   try {
-    // 🔒 Validate inputs
     if (!date || !projectId || !wagonType) {
       return res.status(400).json({
         status: 'Error',
@@ -49,7 +75,7 @@ router.post('/daily-wagon-update', async (req, res) => {
       });
     }
 
-    // 1. 🔼 Update inventory with produced parts (Stock In)
+    // 1. 🔼 Update inventory (Stock In)
     for (const part in partsProduced) {
       const qty = partsProduced[part];
       await Inventory.updateOne(
@@ -59,35 +85,36 @@ router.post('/daily-wagon-update', async (req, res) => {
       );
     }
 
-    // 2. 📦 Get BOM for the selected wagon type (from WagonConfig)
-const bom = await WagonConfig.findOne({ wagonType }).lean();
-if (!bom) {
-  return res.status(400).json({
-    status: 'Error',
-    message: `No BOM found for wagonType ${wagonType}`
-  });
-}
+    // 2. 📦 Get BOM
+    const bom = await WagonConfig.findOne({ wagonType }).lean();
+    if (!bom) {
+      return res.status(400).json({
+        status: 'Error',
+        message: `No BOM found for wagonType ${wagonType}`
+      });
+    }
 
-    // 3. 🧮 Compute parts consumed across all completed stages (using stage.partUsage)
-const totalPartsToConsume = {};
-const stageMap = new Map((bom.stages || []).map(s => [String(s?.name || ''), s]));
+    // 3. 🧮 Parts consumption
+    const totalPartsToConsume = {};
+    const stageMap = new Map((bom.stages || []).map(s => [String(s?.name || ''), s]));
 
-for (const [stageName, doneRaw] of Object.entries(stagesCompleted || {})) {
-  const done = Math.max(0, parseInt(doneRaw, 10) || 0);
-  if (!done) continue;
+    for (const [stageName, doneRaw] of Object.entries(stagesCompleted || {})) {
+      const done = Math.max(0, parseInt(doneRaw, 10) || 0);
+      if (!done) continue;
 
-  const stageDef = stageMap.get(String(stageName));
-  const usageList = Array.isArray(stageDef?.partUsage) ? stageDef.partUsage : [];
+      const stageDef = stageMap.get(String(stageName));
+      const usageList = Array.isArray(stageDef?.partUsage) ? stageDef.partUsage : [];
 
-  usageList.forEach(u => {
-    const part = String(u?.name || '');
-    const perWagon = Number(u?.used || 0);
-    if (!part || perWagon <= 0) return;
-    totalPartsToConsume[part] = (totalPartsToConsume[part] || 0) + perWagon * done;
-  });
-}
+      usageList.forEach(u => {
+        const part = String(u?.name || '');
+        const perWagon = Number(u?.used || 0);
+        if (!part || perWagon <= 0) return;
+        totalPartsToConsume[part] =
+          (totalPartsToConsume[part] || 0) + perWagon * done;
+      });
+    }
 
-    // 4. 🔽 Deduct consumed parts (Stock Out)
+    // 4. 🔽 Deduct inventory (Stock Out)
     for (const part in totalPartsToConsume) {
       const qtyToDeduct = totalPartsToConsume[part];
       await Inventory.updateOne(
@@ -98,6 +125,8 @@ for (const [stageName, doneRaw] of Object.entries(stagesCompleted || {})) {
     }
 
     // 5. 📝 Log entry
+    const pdiCount = Number(stagesCompleted?.PDI || 0);
+
     await DailyWagonLog.create({
       date,
       projectId,
@@ -105,13 +134,13 @@ for (const [stageName, doneRaw] of Object.entries(stagesCompleted || {})) {
       partsProduced,
       stagesCompleted,
       partsConsumed: totalPartsToConsume,
-      wagonReadyCount
+      wagonReadyCount,
+      pdiCount,                // ✅ final stage
+      readyForPullout: pdiCount, // ✅ mirror PDI
+      pulloutDone: 0           // ✅ initialize
     });
 
-    res.json({
-      status: 'Success',
-      message: '✅ Daily update saved successfully'
-    });
+    res.json({ status: 'Success', message: '✅ Daily update saved successfully' });
   } catch (err) {
     console.error('❌ Daily wagon update error:', err);
     res.status(500).json({ status: 'Error', message: err.message });
@@ -119,12 +148,61 @@ for (const [stageName, doneRaw] of Object.entries(stagesCompleted || {})) {
 });
 
 // ----------------------
-// ✅ Get BOM (normalized for frontend)
+// ✅ Update Pullout (by projectId)
+// ----------------------
+router.post('/pullout-update/:projectId', async (req, res) => {
+  try {
+    const { count } = req.body;
+    const { projectId } = req.params;
+
+    // find the latest log for this project
+    const log = await DailyWagonLog.findOne({ projectId }).sort({ date: -1 });
+
+    if (!log) {
+      return res.status(404).json({ status: 'Error', message: 'Log not found' });
+    }
+
+    if (!count || count <= 0) {
+      return res.status(400).json({ status: 'Error', message: 'Count must be greater than 0' });
+    }
+
+    if (count > log.pdiCount) {
+      return res.status(400).json({
+        status: 'Error',
+        message: `Only ${log.pdiCount} wagons available for pullout`
+      });
+    }
+
+    // 🔄 Update values
+    log.pulloutDone += count;
+    log.pdiCount -= count;
+    log.readyForPullout = log.pdiCount; // mirror PDI
+
+    await log.save();
+
+    res.json({
+      status: 'Success',
+      message: `${count} wagons pulled out successfully`,
+      log
+    });
+  } catch (err) {
+    console.error('❌ Pullout update error:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
+  }
+});
+
+
+// ----------------------
+// ✅ Get BOM
 // ----------------------
 router.get('/bom/:wagonType', async (req, res) => {
   try {
-    const safe = String(req.params.wagonType).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const doc = await WagonConfig.findOne({ wagonType: new RegExp(`^${safe}$`, 'i') }).lean();
+    const safe = String(req.params.wagonType)
+      .trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const doc = await WagonConfig.findOne({
+      wagonType: new RegExp(`^${safe}$`, 'i')
+    }).lean();
 
     if (!doc) {
       return res.status(404).json({
@@ -141,7 +219,10 @@ router.get('/bom/:wagonType', async (req, res) => {
     const stages = (doc.stages || []).map(s => ({
       name: String(s?.name || ''),
       partUsage: Array.isArray(s?.partUsage)
-        ? s.partUsage.map(u => ({ name: String(u?.name || ''), used: Number(u?.used || 0) }))
+        ? s.partUsage.map(u => ({
+            name: String(u?.name || ''),
+            used: Number(u?.used || 0)
+          }))
         : []
     }));
 
@@ -151,17 +232,15 @@ router.get('/bom/:wagonType', async (req, res) => {
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
+
 // ----------------------
 // ✅ Get Inventory for a Project
 // ----------------------
 router.get('/parts/:projectId', async (req, res) => {
   try {
     const { projectId } = req.params;
-
-    // Find all inventory docs for this project
     const items = await Inventory.find({ projectId });
 
-    // Convert to { partName: qty } format
     const inventoryObj = {};
     items.forEach(item => {
       inventoryObj[item.part] = item.quantity;
