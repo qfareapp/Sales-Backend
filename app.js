@@ -1,4 +1,3 @@
-// Load environment variables from .env
 require('dotenv').config();
 
 const express = require('express');
@@ -6,7 +5,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 
-// Import routes
+// Routes
 const enquiryRoutes = require('./routes/enquiry');
 const dailyUpdateRoutes = require('./routes/dailyUpdate');
 const productionRoutes = require('./routes/production');
@@ -15,16 +14,17 @@ const inventoryRoutes = require('./routes/inventory');
 
 const app = express();
 
-/* ---------------------- CORS (env-driven, Vercel-friendly) ---------------------- */
-const rawOrigins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-// Set ALLOW_VERCEL_PREVIEWS=true to allow any *.vercel.app preview URL
-const allowVercelPreviews = String(process.env.ALLOW_VERCEL_PREVIEWS || '').toLowerCase() === 'true';
+/* ---------------------- CORS ---------------------- */
+const rawOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+const allowVercelPreviews = String(process.env.ALLOW_VERCEL_PREVIEWS || '')
+  .toLowerCase() === 'true';
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow non-browser requests (e.g., curl, server-to-server)
-    if (!origin) return cb(null, true);
-
+    if (!origin) return cb(null, true); // non-browser requests
     if (rawOrigins.includes(origin)) return cb(null, true);
 
     try {
@@ -32,7 +32,7 @@ app.use(cors({
       if (allowVercelPreviews && hostname.endsWith('.vercel.app')) {
         return cb(null, true);
       }
-    } catch (_) { /* ignore parse errors */ }
+    } catch (_) {}
 
     return cb(new Error('Not allowed by CORS'));
   },
@@ -40,32 +40,29 @@ app.use(cors({
   credentials: true,
 }));
 
-// Parse JSON bodies
+/* ---------------------- Middleware ---------------------- */
 app.use(express.json());
 
-// Static uploads (note: use persistent disk or cloud storage in prod)
-const uploadsDir = path.join(__dirname, 'uploads');
-app.use('/uploads', express.static(uploadsDir));
+// Static uploads
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-/* ---------------------- Request logger (optional) ---------------------- */
+// Request logger
 app.use((req, _res, next) => {
   console.log(`[${req.method}] ${req.originalUrl}`);
   next();
 });
 
-/* ---------------------- Health check ---------------------- */
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
-});
+/* ---------------------- Health ---------------------- */
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-/* ---------------------- API routes ---------------------- */
+/* ---------------------- Routes ---------------------- */
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/enquiries', enquiryRoutes);
 app.use('/api/daily-updates', dailyUpdateRoutes);
 app.use('/api/production', productionRoutes);
 app.use('/api/wagons', wagonRoutes);
 
-/* ---------------------- MongoDB connection ---------------------- */
+/* ---------------------- MongoDB ---------------------- */
 const mongoURI = process.env.MONGODB_URI;
 if (!mongoURI) {
   console.error('❌ MONGODB_URI not found in environment.');
@@ -79,6 +76,18 @@ mongoose.connect(mongoURI)
     process.exit(1);
   });
 
-/* ---------------------- Start server ---------------------- */
+/* ---------------------- Error handler ---------------------- */
+app.use((err, req, res, _next) => {
+  console.error('❌ Server Error:', err.message);
+  res.status(err.status || 500).json({ status: 'Error', message: err.message });
+});
+
+/* ---------------------- Start ---------------------- */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+process.on('SIGINT', async () => {
+  await mongoose.connection.close();
+  console.log('MongoDB connection closed');
+  process.exit(0);
+});

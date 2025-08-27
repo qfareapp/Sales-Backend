@@ -5,28 +5,32 @@ const Inventory = require('../models/Inventory');
 
 // ✅ POST /api/inventory/add → log entry + update Inventory collection
 router.post('/add', async (req, res) => {
-  const { date, projectId, wagonType, partEntries } = req.body;
+  const { date, projectId, wagonType, partEntries = [] } = req.body;
 
   try {
-    for (const entry of partEntries) {
-      const { name, quantity } = entry;
-
-      // 1. Log the daily entry
-      await PartInventoryLog.create({
-        date,
-        projectId,
-        wagonType,
-        part: name,
-        quantity
-      });
-
-      // 2. Update running inventory (upsert)
-      await Inventory.updateOne(
-        { projectId, part: name },
-        { $inc: { quantity } },
-        { upsert: true }
-      );
+    if (!date || !projectId || !wagonType) {
+      return res.status(400).json({ status: 'Error', message: 'date, projectId, wagonType required' });
     }
+
+    // 1. Log all parts in one go
+    const logs = partEntries.map(({ name, quantity }) => ({
+      date,
+      projectId,
+      wagonType,
+      part: name,
+      quantity
+    }));
+    if (logs.length > 0) await PartInventoryLog.insertMany(logs);
+
+    // 2. Bulk update inventory
+    const ops = partEntries.map(({ name, quantity }) => ({
+      updateOne: {
+        filter: { projectId, part: name },
+        update: { $inc: { quantity } },
+        upsert: true
+      }
+    }));
+    if (ops.length > 0) await Inventory.bulkWrite(ops);
 
     res.status(201).json({ status: 'Success', message: 'Inventory logged & updated' });
   } catch (err) {
@@ -38,19 +42,26 @@ router.post('/add', async (req, res) => {
 // ✅ GET /api/inventory/available/:projectId → live inventory totals
 router.get('/available/:projectId', async (req, res) => {
   try {
-    const projectId = req.params.projectId;
+    const { projectId } = req.params;
 
-    const data = await Inventory.find({ projectId });
+    const items = await Inventory.find({ projectId }).lean();
 
     const formatted = {};
-    data.forEach(item => {
-      formatted[item.part] = item.quantity;
+    items.forEach(it => {
+      formatted[it.part] = {
+        available: it.quantity,
+        reserved: it.reserved || 0,
+        minLevel: it.minLevel || 0,
+        maxLevel: it.maxLevel || 0
+      };
     });
 
     res.json(formatted);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('❌ Error fetching inventory:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
   }
 });
+
 
 module.exports = router;

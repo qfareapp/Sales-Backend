@@ -275,4 +275,143 @@ router.get('/parts/:projectId', async (req, res) => {
   }
 });
 
+// ----------------------
+// ✅ Project Overview (single view)
+// ----------------------
+router.get('/projects/:projectId/overview', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    const plan = await ProductionPlan.findOne({ projectId }).lean();
+    if (!plan) {
+      return res.status(404).json({ status: 'Error', message: 'Project not found' });
+    }
+
+    // Inventory
+    const inventory = await Inventory.find({ projectId }).lean();
+
+    // Logs (day-wise)
+    const logs = await DailyWagonLog.find({ projectId }).sort({ date: -1 }).lean();
+
+    // Aggregate totals
+    const totals = await DailyWagonLog.aggregate([
+      { $match: { projectId } },
+      {
+        $group: {
+          _id: null,
+          totalPDI: { $sum: '$pdiCount' },
+          totalPullout: { $sum: '$pulloutDone' }
+        }
+      }
+    ]);
+
+    const stats = totals[0] || { totalPDI: 0, totalPullout: 0 };
+    const readyForPullout = stats.totalPDI - stats.totalPullout;
+
+    res.json({
+      project: plan,
+      inventory,
+      logs,
+      totals: {
+        pdi: stats.totalPDI,
+        pulloutDone: stats.totalPullout,
+        readyForPullout
+      }
+    });
+  } catch (err) {
+    console.error('❌ Project overview error:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
+  }
+});
+
+// ----------------------
+// ✅ Stage-wise Aggregation
+// ----------------------
+router.get('/stages/:projectId', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    // 1) Aggregate completions from all logs (all time; change to "current month" if you prefer)
+    const logs = await DailyWagonLog.find({ projectId }).lean();
+
+    const stageTotals = {};
+    logs.forEach(log => {
+      if (log.stagesCompleted) {
+        for (const [stage, qty] of Object.entries(log.stagesCompleted)) {
+          if (!stage) continue;
+          stageTotals[stage] = stageTotals[stage] || { stage, completed: 0 };
+          stageTotals[stage].completed += Number(qty) || 0;
+        }
+      }
+    });
+
+    // 2) Find plan & wagonType (fallback to latest log’s wagonType if plan missing)
+    const plan = await ProductionPlan.findOne({ projectId }).lean();
+    let wagonType = plan?.wagonType;
+    if (!wagonType) {
+      const latestLog = await DailyWagonLog.findOne({ projectId }).sort({ date: -1 }).lean();
+      if (latestLog?.wagonType) wagonType = latestLog.wagonType;
+    }
+
+    // 3) Load BOM (optional per-stage targets)
+    const bom = wagonType ? await WagonConfig.findOne({ wagonType }).lean() : null;
+    const bomStageMap = new Map(
+      (bom?.stages || []).map(s => [String(s?.name || ''), Number(s?.target || 0)])
+    );
+
+    // 4) Canonical stage order (must match your UI)
+    const STAGE_ROWS = [
+      'Boxing',
+      'BMP',
+      'Wheeling & Visual Clearence',
+      'Shot Blasting & Primer',
+      'Final Painting & Lettering',
+      'Air Brake Testing',
+      'APD',
+      'PDI'
+    ];
+
+    // 5) Build rows in canonical order; pad missing ones with zeros
+    const rows = STAGE_ROWS.map(name => {
+      const completed = stageTotals[name]?.completed || 0;
+      const total = bomStageMap.get(name) || plan?.monthlyTarget || 0;
+      return { stage: name, completed, total };
+    });
+
+    res.json(rows);
+  } catch (err) {
+    console.error('❌ Stage aggregation error:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
+  }
+});
+
+// ----------------------
+// ✅ Daily Logs for Current Month
+// ----------------------
+router.get('/daily', async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) {
+      return res.status(400).json({ status: 'Error', message: 'projectId is required' });
+    }
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    const logs = await DailyWagonLog.find({
+      projectId,
+      date: { $gte: startOfMonth, $lt: startOfNextMonth }
+    })
+      .sort({ date: 1 })
+      .lean();
+
+    res.json(logs);
+  } catch (err) {
+    console.error('❌ Daily logs fetch error:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
+  }
+});
+
+
 module.exports = router;
