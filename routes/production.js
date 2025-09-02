@@ -1,32 +1,74 @@
+const mongoose = require('mongoose');
+
 const express = require('express');
 const router = express.Router();
 const ProductionPlan = require('../models/ProductionPlan');
 const Inventory = require('../models/Inventory');
 const WagonConfig = require('../models/WagonConfig');
 const DailyWagonLog = require('../models/DailyWagonLog'); // ✅ Log model
+const DailyUpdate = require('../models/DailyUpdate');
 
 // ----------------------
 // ✅ Monthly Planning
 // ----------------------
 router.post('/monthly-planning', async (req, res) => {
   try {
-    const plan = new ProductionPlan(req.body);
-    await plan.save();
-    res.json({ status: 'Success' });
+    const { projectId, month, monthlyTarget, clientName, clientType, wagonType } = req.body;
+
+    if (!month) {
+      return res.status(400).json({ status: 'Error', message: 'Month is required (YYYY-MM)' });
+    }
+
+    const [y, m] = month.split('-');
+    const year = Number(y);
+    const monthNum = Number(m);
+
+    // 🔑 Key: use projectId + year + monthNum as unique selector
+    const plan = await ProductionPlan.findOneAndUpdate(
+      { projectId, year, monthNum },
+      {
+        $set: {
+          projectId,
+          clientName,
+          clientType,
+          wagonType,
+          month,
+          monthNum,
+          year,
+          monthlyTarget
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ status: 'Success', plan });
   } catch (err) {
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
 
+
+
+// 🔄 UPDATE HERE in productionRoutes.js
 router.get('/monthly-planning', async (req, res) => {
   try {
-    const plans = await ProductionPlan.find().sort({ createdAt: -1 }).lean();
+    const { projectId, month, year } = req.query;
 
-    // group PDI + Pullout counts from logs
+    let query = {};
+    if (projectId) query.projectId = projectId;
+    if (year) query.year = Number(year);
+    if (month) query.monthNum = Number(month); // month is 1–12
+
+    const plans = await ProductionPlan.find(query).sort({ year: -1, monthNum: -1 }).lean();
+
     const logs = await DailyWagonLog.aggregate([
       {
         $group: {
-          _id: '$projectId',
+          _id: {
+            projectId: '$projectId',
+            year: { $year: '$date' },
+            monthNum: { $month: '$date' }
+          },
           totalPDI: { $sum: '$pdiCount' },
           totalPullout: { $sum: '$pulloutDone' }
         }
@@ -34,16 +76,20 @@ router.get('/monthly-planning', async (req, res) => {
     ]);
 
     const logMap = new Map(
-      logs.map(l => [l._id, {
-        totalPDI: l.totalPDI,
-        totalPullout: l.totalPullout,
-        readyForPullout: l.totalPDI - l.totalPullout
-      }])
+      logs.map(l => [
+        `${l._id.projectId}-${l._id.year}-${l._id.monthNum}`,
+        {
+          totalPDI: l.totalPDI,
+          totalPullout: l.totalPullout,
+          readyForPullout: l.totalPDI - l.totalPullout
+        }
+      ])
     );
 
-    // attach PDI + Pullout info to each plan
     const enriched = plans.map(p => {
-      const logStats = logMap.get(p.projectId) || { totalPDI: 0, totalPullout: 0, readyForPullout: 0 };
+      const key = `${p.projectId}-${p.year}-${p.monthNum}`;
+      const logStats = logMap.get(key) || { totalPDI: 0, totalPullout: 0, readyForPullout: 0 };
+
       return {
         ...p,
         pdi: logStats.totalPDI,
@@ -57,6 +103,7 @@ router.get('/monthly-planning', async (req, res) => {
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
+
 
 // ----------------------
 // ✅ Daily Wagon Update (store PDI as Ready for Pullout)
@@ -185,23 +232,34 @@ router.post('/pullout-update/:projectId', async (req, res) => {
       });
     }
 
-    // 2. Log the pullout as a new entry (history preserved)
+    // 2. Log the pullout in production logs
     await DailyWagonLog.create({
       date: new Date(),
       projectId,
-      wagonType: 'N/A', // optional, can fetch from plan
+      wagonType: 'N/A',
       partsProduced: {},
       stagesCompleted: {},
       partsConsumed: {},
       wagonReadyCount: 0,
-      pdiCount: 0,                  // no new PDI
-      readyForPullout: 0,           // no new ready wagons
-      pulloutDone: count            // only pullout recorded
+      pdiCount: 0,
+      readyForPullout: 0,
+      pulloutDone: count
     });
+
+    // 3. 🔄 ALSO log the pullout into DailyUpdate (sales side)
+    const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+await DailyUpdate.create({
+  date: today,
+  projectId,
+  wagonSold: count,
+  source: 'pullout'
+});
 
     res.json({
       status: 'Success',
-      message: `${count} wagons pulled out successfully`,
+      message: `${count} wagons pulled out & delivered successfully`,
       newTotals: {
         totalPDI: stats.totalPDI,
         totalPullout: stats.totalPullout + count,
@@ -330,51 +388,61 @@ router.get('/projects/:projectId/overview', async (req, res) => {
 router.get('/stages/:projectId', async (req, res) => {
   try {
     const { projectId } = req.params;
+    const { month, year } = req.query;
 
-    // 1) Aggregate completions from all logs (all time; change to "current month" if you prefer)
-    const logs = await DailyWagonLog.find({ projectId }).lean();
+    // If month/year not passed → default to current month
+    const now = new Date();
+    const y = year ? Number(year) : now.getFullYear();
+    const m = month ? Number(month) - 1 : now.getMonth();
+
+    const startOfMonth = new Date(y, m, 1);
+    const startOfNextMonth = new Date(y, m + 1, 1);
+
+    // 1) Aggregate completions for selected month
+    const logs = await DailyWagonLog.find({
+      projectId,
+      date: { $gte: startOfMonth, $lt: startOfNextMonth }
+    }).lean();
 
     const stageTotals = {};
     logs.forEach(log => {
       if (log.stagesCompleted) {
         for (const [stage, qty] of Object.entries(log.stagesCompleted)) {
-          if (!stage) continue;
           stageTotals[stage] = stageTotals[stage] || { stage, completed: 0 };
           stageTotals[stage].completed += Number(qty) || 0;
         }
       }
     });
 
-    // 2) Find plan & wagonType (fallback to latest log’s wagonType if plan missing)
-    const plan = await ProductionPlan.findOne({ projectId }).lean();
+    // 2) Get monthly plan for that month
+    const plan = await ProductionPlan.findOne({
+      projectId,
+      year: y,
+      monthNum: m + 1
+    }).lean();
+
+    // 3) Load BOM (for optional per-stage targets)
     let wagonType = plan?.wagonType;
     if (!wagonType) {
-      const latestLog = await DailyWagonLog.findOne({ projectId }).sort({ date: -1 }).lean();
+      const latestLog = logs[logs.length - 1];
       if (latestLog?.wagonType) wagonType = latestLog.wagonType;
     }
-
-    // 3) Load BOM (optional per-stage targets)
     const bom = wagonType ? await WagonConfig.findOne({ wagonType }).lean() : null;
     const bomStageMap = new Map(
       (bom?.stages || []).map(s => [String(s?.name || ''), Number(s?.target || 0)])
     );
 
-    // 4) Canonical stage order (must match your UI)
+    // 4) Canonical order
     const STAGE_ROWS = [
-      'Boxing',
-      'BMP',
-      'Wheeling & Visual Clearence',
-      'Shot Blasting & Primer',
-      'Final Painting & Lettering',
-      'Air Brake Testing',
-      'APD',
-      'PDI'
+      'Boxing', 'BMP', 'Wheeling & Visual Clearence',
+      'Shot Blasting & Primer', 'Final Painting & Lettering',
+      'Air Brake Testing', 'APD', 'PDI'
     ];
 
-    // 5) Build rows in canonical order; pad missing ones with zeros
+    // 5) Build rows
     const rows = STAGE_ROWS.map(name => {
       const completed = stageTotals[name]?.completed || 0;
-      const total = bomStageMap.get(name) || plan?.monthlyTarget || 0;
+      const total = bomStageMap.get(name) || plan?.monthlyTarget || 0; // 🔑 monthly target per month
       return { stage: name, completed, total };
     });
 
@@ -385,19 +453,25 @@ router.get('/stages/:projectId', async (req, res) => {
   }
 });
 
+
 // ----------------------
-// ✅ Daily Logs for Current Month
+// ✅ Daily Logs (supports month/year query)
 // ----------------------
 router.get('/daily', async (req, res) => {
   try {
-    const { projectId } = req.query;
+    const { projectId, month, year } = req.query;
+
     if (!projectId) {
       return res.status(400).json({ status: 'Error', message: 'projectId is required' });
     }
 
+    // If month/year not passed → default to current month
     const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const y = year ? Number(year) : now.getFullYear();
+    const m = month ? Number(month) - 1 : now.getMonth(); // 0-indexed
+
+    const startOfMonth = new Date(y, m, 1);
+    const startOfNextMonth = new Date(y, m + 1, 1);
 
     const logs = await DailyWagonLog.find({
       projectId,
@@ -412,6 +486,55 @@ router.get('/daily', async (req, res) => {
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
+
+// ----------------------
+// ✅ Overall Project Totals (all months)
+// ----------------------
+router.get('/projects/:projectId/overall', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    // 1) Aggregate all logs for this project (all months)
+    const totals = await DailyWagonLog.aggregate([
+      { $match: { projectId } },
+      {
+        $group: {
+          _id: null,
+          totalPDI: { $sum: '$pdiCount' },
+          totalPullout: { $sum: '$pulloutDone' }
+        }
+      }
+    ]);
+
+    const stats = totals[0] || { totalPDI: 0, totalPullout: 0 };
+    const readyForPullout = stats.totalPDI - stats.totalPullout;
+
+    // 2) Find confirmed order for this projectId
+    const confirmedOrder = await mongoose.model('Enquiry').findOne({
+      projectId,
+      stage: 'Confirmed'
+    }).lean();
+
+    // 3) Compute total ordered wagons
+    const totalOrdered = confirmedOrder
+      ? (Number(confirmedOrder.noOfRakes || 0) * Number(confirmedOrder.wagonsPerRake || 0))
+      : 0;
+
+    // 4) Response
+    res.json({
+      projectId,
+      overallCompleted: stats.totalPDI,
+      overallPulloutDone: stats.totalPullout,
+      readyForPullout,
+      totalOrdered
+    });
+  } catch (err) {
+    console.error('❌ Overall totals error:', err);
+    res.status(500).json({ status: 'Error', message: err.message });
+  }
+});
+
+
 
 
 module.exports = router;
