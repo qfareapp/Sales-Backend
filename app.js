@@ -5,13 +5,6 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 
-// Routes
-const enquiryRoutes = require('./routes/enquiry');
-const dailyUpdateRoutes = require('./routes/dailyUpdate');
-const productionRoutes = require('./routes/production');
-const wagonRoutes = require('./routes/wagons');
-const inventoryRoutes = require('./routes/inventory');
-
 const app = express();
 
 /* ---------------------- CORS ---------------------- */
@@ -19,12 +12,13 @@ const rawOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
+
 const allowVercelPreviews = String(process.env.ALLOW_VERCEL_PREVIEWS || '')
   .toLowerCase() === 'true';
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // non-browser requests
+    if (!origin) return cb(null, true); // ✅ allow non-browser (Postman, curl)
     if (rawOrigins.includes(origin)) return cb(null, true);
 
     try {
@@ -34,7 +28,7 @@ app.use(cors({
       }
     } catch (_) {}
 
-    return cb(new Error('Not allowed by CORS'));
+    return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
@@ -42,9 +36,13 @@ app.use(cors({
 
 /* ---------------------- Middleware ---------------------- */
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // ✅ needed for multer + form-data
 
-// Static uploads
+// ✅ Serve static files (uploads, React build, etc.)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Optional: Serve React build if deployed together
+// app.use(express.static(path.join(__dirname, 'client', 'build')));
 
 // Request logger
 app.use((req, _res, next) => {
@@ -56,8 +54,14 @@ app.use((req, _res, next) => {
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 /* ---------------------- Routes ---------------------- */
+const enquiryRoutes = require('./routes/enquiry');
+const dailyUpdateRoutes = require('./routes/dailyUpdate');
+const productionRoutes = require('./routes/production');
+const wagonRoutes = require('./routes/wagons');
+const inventoryRoutes = require('./routes/inventory');
+
 app.use('/api/inventory', inventoryRoutes);
-app.use('/api/enquiries', enquiryRoutes);
+app.use('/api/enquiries', enquiryRoutes);   // ⚡ includes milestones & project-summary
 app.use('/api/daily-updates', dailyUpdateRoutes);
 app.use('/api/production', productionRoutes);
 app.use('/api/wagons', wagonRoutes);
@@ -69,7 +73,10 @@ if (!mongoURI) {
   process.exit(1);
 }
 
-mongoose.connect(mongoURI)
+mongoose.connect(mongoURI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
   .then(() => console.log('✅ MongoDB Connected'))
   .catch((err) => {
     console.error('❌ MongoDB Connection Error:', err);
