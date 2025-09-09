@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 
 // ---- Multer setup ----
-const uploadDir = path.join(__dirname, '..', 'uploads');
+const uploadDir = path.resolve(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
