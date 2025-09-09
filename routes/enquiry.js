@@ -386,33 +386,14 @@ router.post('/:id/attachments', upload.array('files'), async (req, res) => {
 // ----------------------------
 router.get('/:id', async (req, res) => {
   try {
-    const enquiry = await Enquiry.findById(req.params.id).lean();
-    if (!enquiry) {
-      return res.status(404).json({ status: 'Error', message: 'Enquiry not found' });
-    }
-
-    // helper
-    const makeAbs = (req, url) => {
-      if (!url) return null;
-      if (/^https?:\/\//i.test(url)) return url;
-      return `${req.protocol}://${req.get('host')}${url.startsWith('/') ? url : `/${url}`}`;
-    };
-
-    // normalize attachment URLs
-    if (Array.isArray(enquiry.attachment)) {
-      enquiry.attachment = enquiry.attachment.map(a => ({
-        ...a,
-        url: makeAbs(req, a.url),
-      }));
-    }
-
+    const enquiry = await Enquiry.findById(req.params.id);
+    if (!enquiry) return res.status(404).json({ status: 'Error', message: 'Enquiry not found' });
     res.json(enquiry);
   } catch (err) {
     console.error('❌ GET by ID Error:', err.message);
     res.status(500).json({ status: 'Error', message: err.message });
   }
 });
-
 
 // ----------------------------
 // PATCH BY ID  (optional after GET :id if you prefer)
