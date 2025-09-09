@@ -239,80 +239,69 @@ const makeAbs = (req, url) => {
   return `${req.protocol}://${req.get('host')}${url.startsWith('/') ? url : `/${url}`}`;
 };
 
-// SAVE MILESTONES (UPDATED: in-place Map update, no spread)
 // ----------------------------
-// SAVE MILESTONES (FIXED)
+// SAVE MILESTONES + APPEND TO attachment
 // ----------------------------
 router.post('/:projectId/milestones', upload.any(), async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // --- 1) Normalize body into grouped object ---
-    console.log('📥 Raw req.body:', req.body);
-
+    // 1) Normalize body (supports nested objects and bracket fields)
     const grouped = {};
-
     for (const [k, v] of Object.entries(req.body || {})) {
       if (typeof v === 'object' && v !== null) {
-        // Case 1: nested object style (advance_received: { date, notes })
-        grouped[k] = v;
-        console.log(`➡️ Nested object milestone: ${k}`, v);
+        grouped[k] = v; // e.g. main_file_opening: { date, notes }
       } else {
-        // Case 2: flat field style (advance_received[date])
-        const m = k.match(/^([^\[]+)\[([^\]]+)\]$/);
+        const m = k.match(/^([^\[]+)\[([^\]]+)\]$/); // e.g. main_file_opening[date]
         if (m) {
           const [, group, sub] = m;
           (grouped[group] ||= {})[sub] = v;
-          console.log(`➡️ Flat field milestone: group="${group}", sub="${sub}", value="${v}"`);
-        } else {
-          console.log('⚠️ Skipping unrecognized key:', k, v);
         }
       }
     }
 
-    // --- 2) Attach uploaded files ---
+    // 2) Attach uploaded files both to milestones and to attachments[]
+    const uploadedForAttachments = []; // <- will be pushed into doc.attachment
     (req.files || []).forEach((f) => {
+      // milestone key from fieldname
       const m = f.fieldname.match(/^([^\[]+)\[file\]$/) || f.fieldname.match(/^([^.]+)\.file$/);
-      if (!m) {
-        console.log('⚠️ Skipping file field (not matching pattern):', f.fieldname);
-        return;
+      const group = m ? (m[1] || m[2]) : null;
+
+      const relUrl = `/uploads/${path.basename(f.path)}`;
+      const name   = f.originalname;
+
+      if (group) {
+        (grouped[group] ||= {});
+        grouped[group].fileUrl  = relUrl; // store RELATIVE in DB
+        grouped[group].fileName = name;
       }
-      const group = m[1];
-      (grouped[group] ||= {});
-      grouped[group].fileUrl = `/uploads/${path.basename(f.path)}`;
-      grouped[group].fileName = f.originalname;
-      console.log(`📎 File attached to group="${group}":`, {
-        fileUrl: grouped[group].fileUrl,
-        fileName: grouped[group].fileName
-      });
+
+      // Also collect for attachments[]
+      uploadedForAttachments.push({ name, url: relUrl });
     });
 
-    console.log('✅ Final grouped object:', JSON.stringify(grouped, null, 2));
-
-    // --- 3) Fetch enquiry ---
+    // 3) Load doc
     const doc = await Enquiry.findOne({ projectId });
     if (!doc) {
       return res.status(404).json({ status: 'Error', message: 'Project not found' });
     }
     if (!doc.milestones) doc.milestones = new Map();
+    if (!Array.isArray(doc.attachment)) doc.attachment = [];
 
-    // --- 4) Helper: cast date safely ---
+    // 4) Date caster
     const castToDateOrNull = (s) => {
-      if (s === undefined) return undefined; // no update
-      if (!s) return null;                  // empty string → clear
+      if (s === undefined) return undefined;
+      if (!s) return null;
       const dt = new Date(`${String(s).slice(0,10)}T00:00:00.000Z`);
       return isNaN(dt) ? null : dt;
     };
 
-    // --- 5) Merge grouped into doc.milestones ---
+    // 5) Merge grouped -> milestones map
     for (const [key, curr] of Object.entries(grouped)) {
       if (key.startsWith('$') || key.includes('.')) continue;
 
       const prev = doc.milestones.get(key) || {};
-
-      const nextDate = (curr.date !== undefined)
-        ? castToDateOrNull(curr.date)
-        : (prev.date ?? null);
+      const nextDate = (curr.date !== undefined) ? castToDateOrNull(curr.date) : (prev.date ?? null);
 
       const next = {
         date: nextDate,
@@ -324,11 +313,16 @@ router.post('/:projectId/milestones', upload.any(), async (req, res) => {
       doc.milestones.set(key, next);
     }
 
-    // --- 6) Force Mongoose to persist map updates ---
+    // 6) Append any uploaded files into attachment[]
+    if (uploadedForAttachments.length) {
+      doc.attachment.push(...uploadedForAttachments);
+    }
+
+    // 7) Persist (force Map detection)
     doc.markModified('milestones');
     await doc.save();
 
-    // --- 7) Build response with absolute file URLs ---
+    // 8) Build response with ABSOLUTE URLs
     const makeAbs = (req, url) => {
       if (!url) return null;
       if (/^https?:\/\//i.test(url)) return url;
@@ -342,17 +336,23 @@ router.post('/:projectId/milestones', upload.any(), async (req, res) => {
         fileUrl: makeAbs(req, v.fileUrl),
       };
     }
+    const responseAttachments = (doc.attachment || []).map(a => ({
+      ...a,
+      url: makeAbs(req, a.url),
+    }));
 
     return res.json({
       status: 'Success',
-      message: 'Milestones saved successfully',
+      message: 'Milestones & attachments updated',
       milestones: responseMilestones,
+      attachments: responseAttachments,
     });
   } catch (err) {
     console.error('❌ milestones save Error:', err);
     return res.status(500).json({ status: 'Error', message: 'Milestones save failed' });
   }
 });
+
 
 // ----------------------------
 // ADD ATTACHMENTS TO ENQUIRY
