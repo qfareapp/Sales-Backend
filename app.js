@@ -59,12 +59,14 @@ const dailyUpdateRoutes = require('./routes/dailyUpdate');
 const productionRoutes = require('./routes/production');
 const wagonRoutes = require('./routes/wagons');
 const inventoryRoutes = require('./routes/inventory');
+const bogieInspectionRoutes = require('./routes/bogieInspection.routes');
 
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/enquiries', enquiryRoutes);   // ⚡ includes milestones & project-summary
 app.use('/api/daily-updates', dailyUpdateRoutes);
 app.use('/api/production', productionRoutes);
 app.use('/api/wagons', wagonRoutes);
+app.use('/api/bogie-inspections', bogieInspectionRoutes);
 
 /* ---------------------- MongoDB ---------------------- */
 const mongoURI = process.env.MONGODB_URI;

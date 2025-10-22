@@ -413,4 +413,46 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+router.post("/:id/milestones/bulk", async (req, res) => {
+  try {
+    const { milestones } = req.body;
+    const { id } = req.params;
+
+    // Small date parser
+    const parseDate = (val) => {
+      if (!val) return null;
+      if (typeof val === "number") {
+        // Excel serial date
+        return new Date(Math.round((val - 25569) * 86400 * 1000));
+      }
+      const dt = new Date(val);
+      return isNaN(dt) ? null : dt;
+    };
+
+    const formatted = milestones.map((m) => ({
+      milestone: m.Milestone,
+      responsibility: m.Responsibility,
+      planDate: parseDate(m.Plan),
+      actualDate: parseDate(m.Actual),
+      status: m.Status || "Plan",
+      lot: m.Lot || "Lot 1",
+    }));
+
+    const enquiry = await Enquiry.findById(id);
+    if (!enquiry) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    if (!Array.isArray(enquiry.milestones)) enquiry.milestones = [];
+    enquiry.milestones.push(...formatted);
+
+    await enquiry.save();
+
+    res.json({ success: true, count: formatted.length });
+  } catch (err) {
+    console.error("❌ Bulk insert failed:", err);
+    res.status(500).json({ error: "Bulk insert failed" });
+  }
+});
+
 module.exports = router;
