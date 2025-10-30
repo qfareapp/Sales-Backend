@@ -34,85 +34,88 @@ router.post(
     { name: "endPullRodPhoto" },
     { name: "brakeShoePhoto" },
     { name: "springPhoto" },
+    { name: "inspectorSignature" },
   ]),
   async (req, res) => {
     try {
-      const {
-        date,
-        wagonType,
-        bogieNo,
-        bogieMake,
-        bogieType,
-        wheelBaseCheck,
-        bogieDiagonalCheck,
-        journalCentreCheck,
-        sideFrameJawCheck,
-        brakeBeamPocket,
-        sideBearer,
-        pushRodCheck,
-        endPullRodCheck,
-        brakeShoeType,
-        brakeShoeCheck,
-        springVisualCheck,
-        adopterType,
-        remarks,
-      } = req.body;
+      const b = req.body;
+      const f = req.files || {};
 
-      const photos = req.files || {};
+      // 🔧 Parse visuals safely
+      const parseJSON = (v) => {
+        try {
+          return v ? JSON.parse(v) : {};
+        } catch {
+          return {};
+        }
+      };
 
       const record = new BogieInspection({
-        date,
-        wagonType,
-        bogieNo,
-        bogieMake,
-        bogieType,
+        date: b.date,
+        wagonType: b.wagonType,
+        bogieNo: b.bogieNo,
+        bogieMake: b.bogieMake,
+        bogieType: b.bogieType,
+
         wheelBase: {
-          check: Number(wheelBaseCheck) || 0,
-          photo: photos.wheelBasePhoto?.[0]?.filename || null,
+          check: Number(b.wheelBaseCheck) || 0,
+          photo: f.wheelBasePhoto?.[0]?.filename || "",
+          visual: parseJSON(b.wheelBaseVisual),
         },
         bogieDiagonal: {
-          check: Number(bogieDiagonalCheck) || 0,
-          photo: photos.bogieDiagonalPhoto?.[0]?.filename || null,
+          check: Number(b.bogieDiagonalCheck) || 0,
+          photo: f.bogieDiagonalPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.bogieDiagonalVisual),
         },
         bogieJournalCentre: {
-          check: Number(journalCentreCheck) || 0,
-          photo: photos.bogieJournalCentrePhoto?.[0]?.filename || null,
+          check: Number(b.journalCentreCheck) || 0,
+          photo: f.bogieJournalCentrePhoto?.[0]?.filename || "",
+          visual: parseJSON(b.bogieJournalCentreVisual),
         },
         sideFrameJaw: {
-          check: Number(sideFrameJawCheck) || 0,
-          photo: photos.sideFrameJawPhoto?.[0]?.filename || null,
+          check: Number(b.sideFrameJawCheck) || 0,
+          photo: f.sideFrameJawPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.sideFrameJawVisual),
         },
         brakeBeamPocket: {
-          value: brakeBeamPocket || "",
-          photo: photos.brakeBeamPhoto?.[0]?.filename || null,
+          value: b.brakeBeamPocket || "",
+          photo: f.brakeBeamPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.brakeBeamPocketVisual),
         },
         sideBearerCentre: {
-          value: sideBearer || "",
-          photo: photos.sideBearerPhoto?.[0]?.filename || null,
+          value: b.sideBearer || "",
+          ref: b.sideBearerRef || "",
+          photo: f.sideBearerPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.sideBearerVisual),
         },
         pushRodCheck: {
-          check: Number(pushRodCheck) || 0,
-          photo: photos.pushRodPhoto?.[0]?.filename || null,
+          check: Number(b.pushRodCheck) || 0,
+          photo: f.pushRodPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.pushRodVisual),
         },
         endPullRodCheck: {
-          check: Number(endPullRodCheck) || 0,
-          photo: photos.endPullRodPhoto?.[0]?.filename || null,
+          check: Number(b.endPullRodCheck) || 0,
+          photo: f.endPullRodPhoto?.[0]?.filename || "",
+          visual: parseJSON(b.endPullRodVisual),
         },
-        brakeShoeType,
+        brakeShoeType: b.brakeShoeType,
         brakeShoeCheck: {
-          check: Number(brakeShoeCheck) || 0,
-          photo: photos.brakeShoePhoto?.[0]?.filename || null,
+          check: Number(b.brakeShoeCheck) || 0,
+          photo: f.brakeShoePhoto?.[0]?.filename || "",
+          visual: parseJSON(b.brakeShoeVisual),
         },
         springVisualCheck: {
-          check: Number(springVisualCheck) || 0,
-          photo: photos.springPhoto?.[0]?.filename || null,
+          check: Number(b.springVisualCheck) || 0,
+          photo: f.springPhoto?.[0]?.filename || "",
         },
-        adopterType,
-        remarks,
+        adopterType: b.adopterType,
+        remarks: b.remarks || "",
+        inspectorSignature: f.inspectorSignature?.[0]?.filename || "",
       });
 
       await record.save();
-      res.json({ success: true, data: record });
+      console.log("✅ Saved Inspection:", record._id);
+      res.json({ success: true, message: "Inspection saved successfully", data: record });
     } catch (err) {
       console.error("❌ Error saving inspection:", err);
       res.status(500).json({ success: false, message: err.message });
@@ -120,17 +123,7 @@ router.post(
   }
 );
 
-/* -------------------- GET: List all -------------------- */
-router.get("/", async (_req, res) => {
-  try {
-    const data = await BogieInspection.find().sort({ date: -1 });
-    res.json({ success: true, data });
-  } catch (err) {
-    console.error("❌ Fetch Error:", err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
+/* -------------------- GET: List / Filter -------------------- */
 router.get("/", async (req, res) => {
   try {
     const { from, to } = req.query;
