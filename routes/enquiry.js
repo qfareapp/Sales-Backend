@@ -6,6 +6,23 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
+// ----------------------------
+// 🔧 Helper: Generate Unique Order ID
+// ----------------------------
+async function generateNextOrderId() {
+  // Find the latest enquiry by created date or orderId sequence
+  const last = await Enquiry.findOne().sort({ createdAt: -1 }).lean();
+
+  let nextNumber = 1;
+  if (last && last.orderId) {
+    const match = last.orderId.match(/ORD-(\d+)/);
+    if (match) nextNumber = parseInt(match[1], 10) + 1;
+  }
+
+  return `ORD-${String(nextNumber).padStart(4, '0')}`;
+}
+
+
 // ---- Multer setup ----
 const uploadDir = path.resolve(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -24,9 +41,8 @@ router.post('/', async (req, res) => {
     const body = req.body;
 
     if (!body.orderId || body.orderId.trim() === '') {
-      const count = await Enquiry.countDocuments();
-      body.orderId = `ORD-${String(count + 1).padStart(4, '0')}`;
-    }
+  body.orderId = await generateNextOrderId();
+}
     if (body.stage === 'Confirmed' && (!body.projectId || body.projectId.trim() === '')) {
       body.projectId = `PRJ-${Date.now()}`;
     }
