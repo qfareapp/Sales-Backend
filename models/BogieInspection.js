@@ -37,6 +37,7 @@ const BogieInspectionSchema = new mongoose.Schema(
     bogieNo: { type: String, required: true },
     bogieMake: { type: String, required: true },
     bogieType: { type: String, required: true },
+    inspectionType: { type: String, default: "before-wheeling" },
 
     /* -------------------- Dimensional Checks -------------------- */
     wheelBase: { type: CheckWithPhotoSchema, default: {} },

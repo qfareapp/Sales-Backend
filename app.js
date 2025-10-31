@@ -60,6 +60,7 @@ const productionRoutes = require('./routes/production');
 const wagonRoutes = require('./routes/wagons');
 const inventoryRoutes = require('./routes/inventory');
 const bogieInspectionRoutes = require('./routes/bogieInspection.routes');
+const bogieAfterWheelRoutes = require('./routes/bogieAfterWheelInspection.routes');
 const salesProdRoutes = require('./routes/SalesProd.routes');
 
 app.use('/api/inventory', inventoryRoutes);
@@ -68,6 +69,7 @@ app.use('/api/daily-updates', dailyUpdateRoutes);
 app.use('/api/production', productionRoutes);
 app.use('/api/wagons', wagonRoutes);
 app.use('/api/bogie-inspections', bogieInspectionRoutes);
+app.use("/api/bogie-inspections", bogieAfterWheelRoutes)
 app.use('/api/sales/production', salesProdRoutes);
 
 /* ---------------------- MongoDB ---------------------- */
