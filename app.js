@@ -39,7 +39,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // ✅ needed for multer + form-data
 
 // ✅ Serve static files (uploads, React build, etc.)
-app.use('/uploads', express.static(path.resolve(__dirname, 'uploads')));
+//app.use('/uploads', express.static(path.resolve(__dirname, 'uploads')));
 
 // Optional: Serve React build if deployed together
 // app.use(express.static(path.join(__dirname, 'client', 'build')));
