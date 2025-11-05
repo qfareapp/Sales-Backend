@@ -158,5 +158,43 @@ router.get("/", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+/* -------------------- UPDATE: Edit existing inspection -------------------- */
+router.put("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Convert nested objects into dot notation for deep update
+    const flatten = (obj, prefix = "", res = {}) => {
+      for (const key in obj) {
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (typeof obj[key] === "object" && obj[key] !== null && !Array.isArray(obj[key])) {
+          flatten(obj[key], path, res);
+        } else {
+          res[path] = obj[key];
+        }
+      }
+      return res;
+    };
+
+    const flattenedUpdates = flatten(updates);
+
+    const record = await BogieInspection.findByIdAndUpdate(
+      id,
+      { $set: flattenedUpdates },
+      { new: true, runValidators: true }
+    );
+
+    if (!record) {
+      return res.status(404).json({ success: false, message: "Inspection not found" });
+    }
+
+    res.json({ success: true, message: "Inspection updated", data: record });
+  } catch (err) {
+    console.error("❌ Error updating inspection:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 
 module.exports = router;
